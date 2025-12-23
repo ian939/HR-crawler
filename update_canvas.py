@@ -3,65 +3,56 @@ import pandas as pd
 from slack_sdk import WebClient
 from datetime import datetime
 
+# 1. 환경 변수 및 설정
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 CANVAS_ID = os.environ.get("SLACK_CANVAS_ID")
 CSV_PATH = "job_listings_all.csv"
+CSV_PATH_2 = "encyclopedia.csv"
+
+# [수정] 본인의 GitHub 정보를 입력하세요
+GITHUB_USER = "ian939"
+GITHUB_REPO = "HR-crawler"
+# 최신 파일을 바로 다운로드할 수 있는 주소입니다.
+DOWNLOAD_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/raw/main/{CSV_PATH_2}"
 
 def update_slack_canvas():
-    if not SLACK_TOKEN or not CANVAS_ID:
-        return
-
+    if not SLACK_TOKEN or not CANVAS_ID: return
     client = WebClient(token=SLACK_TOKEN)
 
     try:
-        if not os.path.exists(CSV_PATH):
-            return
-            
+        if not os.path.exists(CSV_PATH): return
         df = pd.read_csv(CSV_PATH)
         df = df.sort_values(by='first_seen', ascending=False)
         today = datetime.now().strftime('%Y-%m-%d')
         
+        # --- 캔버스 마크다운 구성 ---
         markdown_text = f"# 🚀 채용 정보 리스트 ({today})\n\n"
         
-        # --- [표 너비 최적화 트릭 적용] ---
-        # 1. '공고 제목' 헤더 뒤에 전각 공백(　)이나 많은 띄어쓰기를 넣어 열 너비를 강제로 확보합니다.
-        # 2. 링크는 헤더 이름을 '🔗'로 줄여서 열 전체를 좁게 만듭니다.
+        # [추가] 다운로드 섹션 - 버튼처럼 보이게 구성
+        markdown_text += "### 📥 데이터 보관함\n"
+        markdown_text += f"> [**💾 최신 CSV 파일 다운로드 (GitHub)**]({DOWNLOAD_URL})\n"
+        markdown_text += "*위 링크를 클릭하면 현재 리포지토리에 저장된 전체 원본 파일을 받을 수 있습니다.*\n\n"
         
-        markdown_text += "| 회사명 | 공고 제목" + " " * 30 + " | 경력 | 등록일 | 🔗 |\n"
+        markdown_text += "---\n\n"
+        
+        # 표 헤더 (이전의 너비 최적화 적용)
+        markdown_text += "| 회사명 | 공고 제목" + "　" * 25 + " | 경력 | 등록일 | 🔗 |\n"
         markdown_text += "|:---|:---|:---|:---|:---:|\n"
         
-        for _, row in df.head(40).iterrows(): # 데이터 노출 개수를 40개로 상향
-            # 제목을 좀 더 길게 노출 (가로 너비 확보용)
-            title = row['title']
-            if len(title) > 45:
-                title = title[:45] + ".."
-            
-            # 링크 열은 오직 아이콘 하나만 (너비 최소화)
-            link_icon = f"[🔗]({row['link']})"
-            
+        for _, row in df.head(40).iterrows():
+            title = row['title'][:45] + ".." if len(row['title']) > 45 else row['title']
             markdown_text += (
-                f"| {row['company']} "
-                f"| {title} "
-                f"| {row['experience']} "
-                f"| {row['first_seen']} "
-                f"| {link_icon} |\n"
+                f"| {row['company']} | {title} | {row['experience']} | {row['first_seen']} | [🔗]({row['link']}) |\n"
             )
             
-        markdown_text += f"\n\n---\n*마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
+        markdown_text += f"\n\n---\n*최종 동기화: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
 
-        response = client.canvases_edit(
+        # 캔버스 전송
+        client.canvases_edit(
             canvas_id=CANVAS_ID,
-            changes=[{
-                "operation": "replace",
-                "document_content": {
-                    "type": "markdown",
-                    "markdown": markdown_text
-                }
-            }]
+            changes=[{"operation": "replace", "document_content": {"type": "markdown", "markdown": markdown_text}}]
         )
-        
-        if response["ok"]:
-            print("✅ 최적화된 표 형식으로 업데이트 성공!")
+        print("✅ 다운로드 링크를 포함하여 업데이트 성공!")
 
     except Exception as e:
         print(f"❌ 오류: {e}")
