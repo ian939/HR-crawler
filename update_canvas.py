@@ -3,35 +3,40 @@ import pandas as pd
 from slack_sdk import WebClient
 from datetime import datetime
 
-# 1. 환경 변수 설정 (로컬 테스트 시에는 직접 입력, GitHub에서는 Secrets 사용)
+# 1. 환경 변수에서 설정값 로드 (GitHub Secrets와 연결됨)
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 CANVAS_ID = os.environ.get("SLACK_CANVAS_ID")
-CSV_FILE = "encyclopedia.csv" # 실제 파일명에 맞게 수정하세요
+CSV_PATH = "encyclopedia.csv" # 크롤러가 생성하는 파일명에 맞게 확인 필요
 
-def update_canvas():
+def update_slack_canvas():
     if not SLACK_TOKEN or not CANVAS_ID:
-        print("❌ 설정 오류: 토큰 또는 캔버스 ID가 없습니다.")
+        print("❌ 에러: SLACK_BOT_TOKEN 또는 SLACK_CANVAS_ID가 설정되지 않았습니다.")
         return
 
     client = WebClient(token=SLACK_TOKEN)
-    
+
     try:
-        # 2. CSV 데이터 로드 및 마크다운 변환
-        df = pd.read_csv(CSV_FILE)
+        # 2. CSV 파일 읽기
+        if not os.path.exists(CSV_PATH):
+            print(f"❌ 에러: {CSV_PATH} 파일을 찾을 수 없습니다.")
+            return
+            
+        df = pd.read_csv(CSV_PATH)
         today = datetime.now().strftime('%Y-%m-%d')
         
-        markdown = f"# 🚀 채용 정보 자동 업데이트 ({today})\n\n"
-        markdown += f"현재 **총 {len(df)}개**의 공고가 올라와 있습니다.\n\n---\n"
+        # 3. 캔버스용 마크다운 생성
+        markdown_text = f"# 🚀 채용 정보 데일리 업데이트 ({today})\n\n"
+        markdown_text += f"오늘 확인된 공고는 총 **{len(df)}개**입니다.\n\n---\n\n"
         
-        # 요약 테이블 생성
-        markdown += "### 📊 공고 요약\n| 회사명 | 공고 제목 | 링크 |\n|:---|:---|:---|\n"
-        for _, row in df.head(15).iterrows(): # 상위 15개만 요약
+        # 요약 테이블 (최신 15개)
+        markdown_text += "### 📊 채용 공고 요약\n| 회사명 | 공고 제목 | 링크 |\n|:---|:---|:---|\n"
+        for _, row in df.head(15).iterrows():
             title = row['title'][:30] + "..." if len(row['title']) > 30 else row['title']
-            markdown += f"| {row['company']} | {title} | [🔗]({row['link']}) |\n"
-        
-        markdown += f"\n\n---\n*마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
+            markdown_text += f"| {row['company']} | {title} | [👉 바로가기]({row['link']}) |\n"
+            
+        markdown_text += f"\n\n---\n*마지막 자동 업데이트 시각: {datetime.now().strftime('%H:%M:%S')}*"
 
-        # 3. 캔버스 전송 (성공했던 API 규격 적용)
+        # 4. 슬랙 API 호출 (테스트 성공했던 그 구조!)
         response = client.canvases_edit(
             canvas_id=CANVAS_ID,
             changes=[
@@ -39,17 +44,19 @@ def update_canvas():
                     "operation": "replace",
                     "document_content": {
                         "type": "markdown",
-                        "markdown": markdown
+                        "markdown": markdown_text
                     }
                 }
             ]
         )
         
         if response["ok"]:
-            print(f"✅ {today} 캔버스 업데이트 완료!")
-            
+            print(f"✅ 슬랙 캔버스 업데이트 성공! ({today})")
+        else:
+            print(f"❌ 슬랙 API 응답 에러: {response['error']}")
+
     except Exception as e:
-        print(f"❌ 오류 발생: {e}")
+        print(f"❌ 실행 중 오류 발생: {e}")
 
 if __name__ == "__main__":
-    update_canvas()
+    update_slack_canvas()
