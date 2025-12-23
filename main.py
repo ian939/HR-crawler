@@ -120,4 +120,34 @@ def crawl_all():
 
         # [잡코리아]
         try:
-            driver.get(f"
+            driver.get(f"https://www.jobkorea.co.kr/Search/?stext={company}")
+            time.sleep(6)
+            posts = driver.find_elements(By.CSS_SELECTOR, ".list-post .post")
+            for p in posts[:10]:
+                corp = p.find_element(By.CSS_SELECTOR, ".name").text.strip()
+                if company in corp:
+                    title_el = p.find_element(By.CSS_SELECTOR, "a.title")
+                    try: exp_text = p.find_element(By.CSS_SELECTOR, ".exp, .option").text
+                    except: exp_text = p.text
+                    results.append({
+                        'site': '잡코리아', 'company': corp, 'title': title_el.text.strip(),
+                        'experience': extract_exp(exp_text),
+                        'link': title_el.get_attribute('href')
+                    })
+        except: pass
+
+    driver.quit()
+
+    if results:
+        df = pd.DataFrame(results).drop_duplicates(subset=['company', 'title'])
+        df = df[['site', 'company', 'title', 'experience', 'link']]
+        
+        # 파일명을 당일 날짜로 설정
+        filename = f"jobs_{datetime.now().strftime('%Y%m%d')}.csv"
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
+        print(f"\n✅ 최종 완료: {filename} 저장됨 (총 {len(df)}건)")
+    else:
+        print("\n❌ 수집된 데이터가 없습니다.")
+
+if __name__ == "__main__":
+    crawl_all()
