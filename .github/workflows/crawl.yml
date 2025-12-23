@@ -23,6 +23,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+# ... (앞부분 동일)
       - name: Run Crawler
         run: python main.py
 
@@ -30,6 +31,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add jobs.csv
+          git add jobs_*.csv  # 모든 날짜별 CSV 파일을 저장소에 기록
           git commit -m "Update job list $(date +'%Y-%m-%d')" || exit 0
           git push
