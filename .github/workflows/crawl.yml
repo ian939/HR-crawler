@@ -3,11 +3,15 @@ name: Daily Job Crawling
 on:
   schedule:
     - cron: '0 23 * * *' # UTC 23:00 = KST 08:00
-  workflow_dispatch: # 수동 실행 버튼 활성화
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # [중요] 권한 설정 추가
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -31,5 +35,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
+          # 변경사항이 없을 때 에러 방지를 위해 || exit 0 유지
           git commit -m "Update job listings: $(date +'%Y-%m-%d')" || exit 0
           git push
