@@ -6,56 +6,71 @@ from datetime import datetime
 # 1. 환경 변수 및 설정
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 CANVAS_ID = os.environ.get("SLACK_CANVAS_ID")
-CSV_PATH = "job_listings_all.csv"
-CSV_PATH_2 = "encyclopedia.csv"
+CSV_PATH = "job_listings_all.csv"  # 실제 파일명 확인!
 
-# [수정] 본인의 GitHub 정보를 입력하세요
+# GitHub 정보 (본인 계정에 맞게 확인)
 GITHUB_USER = "ian939"
 GITHUB_REPO = "HR-crawler"
-# 최신 파일을 바로 다운로드할 수 있는 주소입니다.
-DOWNLOAD_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/raw/main/{CSV_PATH_2}"
+
+# [수정된 다운로드 주소] - 파일명을 문자열로 정확히 넣었습니다.
+DOWNLOAD_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/raw/main/{CSV_PATH}"
 
 def update_slack_canvas():
     if not SLACK_TOKEN or not CANVAS_ID: return
     client = WebClient(token=SLACK_TOKEN)
 
     try:
-        if not os.path.exists(CSV_PATH): return
+        # 2. 데이터 확인 (안전장치)
+        if not os.path.exists(CSV_PATH):
+            print("❌ CSV 파일을 찾을 수 없어 업데이트를 중단합니다.")
+            return
+            
         df = pd.read_csv(CSV_PATH)
+        
+        # 데이터가 비어있으면 캔버스를 지우지 않도록 중단
+        if df.empty:
+            print("⚠️ 데이터가 비어있습니다. 기존 캔버스를 유지합니다.")
+            return
+
         df = df.sort_values(by='first_seen', ascending=False)
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # --- 캔버스 마크다운 구성 ---
-        markdown_text = f"# 🚀 채용 정보 리스트 ({today})\n\n"
+        # 3. 캔버스 마크다운 구성
+        markdown_text = f"# 🚀 실시간 채용 리포트\n\n"
+        markdown_text += "### 📥 데이터 다운로드\n"
+        markdown_text += f"> [**💾 최신 CSV 파일 다운로드**]({DOWNLOAD_URL})\n"
+        markdown_text += f"*최종 업데이트: {today}*\n\n---\n\n"
         
-        # [추가] 다운로드 섹션 - 버튼처럼 보이게 구성
-        markdown_text += "### 📥 데이터 보관함\n"
-        markdown_text += f"> [**💾 최신 CSV 파일 다운로드 (GitHub)**]({DOWNLOAD_URL})\n"
-        markdown_text += "*위 링크를 클릭하면 현재 리포지토리에 저장된 전체 원본 파일을 받을 수 있습니다.*\n\n"
-        
-        markdown_text += "---\n\n"
-        
-        # 표 헤더 (이전의 너비 최적화 적용)
+        # 표 구성 (너비 최적화 적용)
         markdown_text += "| 회사명 | 공고 제목" + "　" * 25 + " | 경력 | 등록일 | 🔗 |\n"
         markdown_text += "|:---|:---|:---|:---|:---:|\n"
         
+        # 상위 40개 데이터만 노출
         for _, row in df.head(40).iterrows():
-            title = row['title'][:45] + ".." if len(row['title']) > 45 else row['title']
+            title = str(row['title'])[:45] + ".." if len(str(row['title'])) > 45 else row['title']
             markdown_text += (
                 f"| {row['company']} | {title} | {row['experience']} | {row['first_seen']} | [🔗]({row['link']}) |\n"
             )
-            
-        markdown_text += f"\n\n---\n*최종 동기화: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
 
-        # 캔버스 전송
-        client.canvases_edit(
+        # 4. 캔버스 전송
+        response = client.canvases_edit(
             canvas_id=CANVAS_ID,
-            changes=[{"operation": "replace", "document_content": {"type": "markdown", "markdown": markdown_text}}]
+            changes=[{
+                "operation": "replace",
+                "document_content": {
+                    "type": "markdown",
+                    "markdown": markdown_text
+                }
+            }]
         )
-        print("✅ 다운로드 링크를 포함하여 업데이트 성공!")
+        
+        if response["ok"]:
+            print(f"✅ 업데이트 성공 ({today})")
+        else:
+            print(f"❌ API 에러: {response['error']}")
 
     except Exception as e:
-        print(f"❌ 오류: {e}")
+        print(f"❌ 실행 중 오류 발생: {e}")
 
 if __name__ == "__main__":
     update_slack_canvas()
