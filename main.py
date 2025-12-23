@@ -19,13 +19,12 @@ def get_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    # 페이지 로딩 최대 대기 시간 설정 (무한 대기 방지)
-    driver.set_page_load_timeout(30)
+    driver.set_page_load_timeout(45) # 타임아웃을 조금 더 여유있게 설정
     return driver
 
 def extract_exp(text):
-    """텍스트에서 경력 연차를 찾아 '경력N↑' 형태로 반환"""
-    if not text: return "경력무관"
+    """텍스트에서 경력 연차를 찾아 '경력N↑' 형태로 반환. 없으면 None 반환"""
+    if not text: return None
     
     # 'N년', 'N~M년' 형태 추출
     match = re.search(r'(\d+)년', text)
@@ -33,31 +32,51 @@ def extract_exp(text):
         return f"경력{match.group(1)}↑"
     if "신입" in text:
         return "신입"
-    return "경력무관"
+    return None # 명시적으로 경력이 없으면 null(None) 처리
 
-def crawl():
-    # '워터'는 노이즈 방지를 위해 포털 검색에서 제외 (공식홈 전용)
+def crawl_bep_official(driver):
+    """'워터' 공식홈페이지 수집 (경력 없어도 포함)"""
+    print(">>> [워터] 공식홈페이지 수집 중...")
+    url = "https://bep.co.kr/Career/recruitment?type=3"
+    results = []
+    try:
+        driver.get(url)
+        # 페이지 로딩을 위해 10초간 충분히 대기
+        time.sleep(10)
+        
+        # 이전에 성공했던 텍스트 기반 수집 로직 강화
+        # '모집중', '시니어', '주니어' 등 키워드가 포함된 요소를 찾음
+        items = driver.find_elements(By.XPATH, "//*[contains(text(), '모집중') or contains(text(), '시니어') or contains(text(), '주니어')]")
+        
+        seen_titles = set()
+        for item in items:
+            title_text = item.text.strip().replace('\n', ' ')
+            # 유효한 길이의 제목이고 중복이 아닐 경우
+            if 10 < len(title_text) < 100 and title_text not in seen_titles:
+                exp = extract_exp(title_text)
+                results.append({
+                    'site': '공식홈',
+                    'company': '워터(BEP)',
+                    'title': title_text,
+                    'experience': exp, # 경력이 없으면 여기서 None(null)이 들어감
+                    'link': url
+                })
+                seen_titles.add(title_text)
+        print(f"  - 워터(BEP): {len(results)}건 수집 완료")
+    except Exception as e:
+        print(f"  - BEP 수집 오류: {e}")
+    return results
+
+def crawl_all():
+    # 포털 검색 리스트 (워터는 노이즈 방지를 위해 제외)
     companies = ["대영채비", "이브이시스", "플러그링크", "볼트업", "차지비", "에버온"]
     results = []
     driver = get_driver()
 
-    # 1. 워터 공식 채용페이지 (BEP)
-    print(">>> [워터] 공식홈페이지 수집 중...")
-    try:
-        driver.get("https://bep.co.kr/Career/recruitment?type=3")
-        time.sleep(7)
-        # 리스트 요소들을 광범위하게 수집
-        items = driver.find_elements(By.CSS_SELECTOR, "div.recruitment-item, li, div[class*='item']")
-        for item in items:
-            t = item.text.strip().replace('\n', ' ')
-            if any(k in t for k in ['매니저', '엔지니어', '팀장', '담당', '신입', '경력']):
-                results.append({
-                    'site': '공식홈', 'company': '워터(BEP)', 'title': t[:40],
-                    'experience': extract_exp(t), 'link': driver.current_url
-                })
-    except: print("  - BEP 수집 실패")
+    # 1. 워터 공식홈 수집 실행
+    results.extend(crawl_bep_official(driver))
 
-    # 2. 포털 사이트 (사람인/원티드/잡코리아)
+    # 2. 나머지 포털 사이트 수집
     for company in companies:
         print(f"\n>>> [{company}] 수집 시작")
         
@@ -70,7 +89,6 @@ def crawl():
                 corp = el.find_element(By.CSS_SELECTOR, ".corp_name").text.strip()
                 if company in corp:
                     title = el.find_element(By.CSS_SELECTOR, ".job_tit").text.strip()
-                    # 경력 정보 추출 (조건 영역)
                     exp_info = el.find_element(By.CSS_SELECTOR, ".job_condition").text
                     results.append({
                         'site': '사람인', 'company': corp, 'title': title,
@@ -88,7 +106,6 @@ def crawl():
                 corp = item.find_element(By.CSS_SELECTOR, '.job-card-company-name').text.strip()
                 if company in corp:
                     title = item.find_element(By.CSS_SELECTOR, '.job-card-title').text.strip()
-                    # 원티드는 카드 전체 텍스트에서 경력 유추
                     results.append({
                         'site': '원티드', 'company': corp, 'title': title,
                         'experience': extract_exp(item.text),
@@ -105,7 +122,9 @@ def crawl():
                 corp = p.find_element(By.CSS_SELECTOR, ".name").text.strip()
                 if company in corp:
                     title = p.find_element(By.CSS_SELECTOR, ".title").text.strip()
-                    exp_info = p.find_element(By.CSS_SELECTOR, ".exp, .option").text
+                    try:
+                        exp_info = p.find_element(By.CSS_SELECTOR, ".exp, .option").text
+                    except: exp_info = None
                     results.append({
                         'site': '잡코리아', 'company': corp, 'title': title,
                         'experience': extract_exp(exp_info),
@@ -115,15 +134,17 @@ def crawl():
 
     driver.quit()
 
-    # 데이터 저장
     if results:
         df = pd.DataFrame(results).drop_duplicates(subset=['company', 'title'])
-        # 날짜별 파일명 생성 (예: jobs_20251223.csv)
+        # 컬럼 순서 고정
+        df = df[['site', 'company', 'title', 'experience', 'link']]
+        
+        # 파일명에 현재 날짜 반영 (예: jobs_20241223.csv)
         filename = f"jobs_{datetime.now().strftime('%Y%m%d')}.csv"
         df.to_csv(filename, index=False, encoding='utf-8-sig')
         print(f"\n✅ 완료: {filename} 저장 ({len(df)}건)")
     else:
-        print("\n❌ 수집된 데이터 없음")
+        print("\n❌ 수집된 데이터가 없습니다.")
 
 if __name__ == "__main__":
-    crawl()
+    crawl_all()
