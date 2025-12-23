@@ -15,12 +15,10 @@ HEADERS = {
 }
 
 def fetch_detail_content(url):
-    """상세 본문 추출: 텍스트 우선 수집, 없으면 이미지 URL 수집"""
+    """상세 본문 추출: 텍스트 우선, 부족하면 이미지 URL 수집 (플러그링크 등 대응)"""
     try:
         time.sleep(2)
         target_url = url
-        
-        # [사람인 우회] 상세 요강 전용 URL로 변환
         if "saramin.co.kr" in url and "rec_idx=" in url:
             rec_idx_match = re.search(r'rec_idx=(\d+)', url)
             if rec_idx_match:
@@ -30,7 +28,6 @@ def fetch_detail_content(url):
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 불필요한 요소 제거
         for tag in soup(["script", "style", "nav", "footer", "header", "button", "aside"]):
             tag.decompose()
 
@@ -41,15 +38,14 @@ def fetch_detail_content(url):
             content_area = soup.select_one(sel)
             if content_area: break
         
-        if not content_area:
-            content_area = soup.body
+        if not content_area: content_area = soup.body
 
-        # 1. 텍스트 추출
+        # 1. 텍스트 추출 및 검증
         text_content = content_area.get_text(separator="\n", strip=True) if content_area else ""
         
-        # 2. '채용공고 상세' 같은 노이즈 문구만 있거나 너무 짧으면 이미지 검색 (플러그링크 케이스)
-        noise_text = ["채용공고 상세", "본문 내용을 찾을 수 없습니다", "로그인"]
-        is_poor = len(text_content) < 150 or any(text_content.strip() == k for k in noise_text)
+        # '채용공고 상세' 문구만 있거나 내용이 너무 부실한 경우 이미지 추출 시도
+        poor_keywords = ["채용공고 상세", "본문 내용을 찾을 수 없습니다", "로그인"]
+        is_poor = len(text_content) < 150 or any(text_content.strip() == k for k in poor_keywords)
 
         if is_poor and content_area:
             imgs = content_area.find_all('img')
@@ -58,24 +54,18 @@ def fetch_detail_content(url):
                 src = img.get('src') or img.get('data-src')
                 if src:
                     if src.startswith('//'): src = "https:" + src
-                    # 무관한 아이콘 이미지 필터링 (보통 공고 이미지는 크기가 큼)
-                    if "icon" not in src.lower() and "logo" not in src.lower():
-                        img_urls.append(src)
-            
+                    if any(x in src.lower() for x in ["icon", "logo", "common"]): continue
+                    img_urls.append(src)
             if img_urls:
                 return "[이미지 공고] " + ", ".join(img_urls)
 
-        # 텍스트가 정상적이면 텍스트 반환
-        if len(text_content) > 100:
-            return text_content[:20000]
-        
-        return "상세 내용은 링크를 참조해 주세요."
-
+        return text_content[:20000] if len(text_content) > 50 else "상세 내용은 링크를 참조해 주세요."
     except Exception as e:
         return f"수집 실패: {str(e)}"
 
 def get_bep_jobs():
-    """BEP(워터) 전기차충전사업부문 수집 전용"""
+    """BEP(워터) 전기차충전사업부문 전용 수집"""
+    # 사용자가 요청한 [전기차충전사업부문] 필터 URL 고정
     url = "https://bep.co.kr/Career/recruitment?type=3"
     jobs = []
     try:
@@ -89,12 +79,13 @@ def get_bep_jobs():
             href = l.get('href', '')
             full_link = f"https://bep.co.kr{href}" if not href.startswith('http') else href
             clean_title = title_text.replace("모집중", "").strip()
-            jobs.append(['BEP(워터)', clean_title, "공고 참조", full_link])
+            # BEP(워터)로 구분하여 저장
+            jobs.append(['BEP(워터)', clean_title, "공고 확인", full_link])
     except: pass
     return jobs
 
 def get_saramin_jobs(companies):
-    """사람인 기업 검색 수집"""
+    """사람인 수집"""
     base_url = "https://www.saramin.co.kr/zf_user/search/recruit"
     jobs = []
     for company in companies:
@@ -109,23 +100,24 @@ def get_saramin_jobs(companies):
                 co_name = co_tag.text.strip()
                 if company in co_name.replace("(주)", "").replace("주식회사", ""):
                     title_tag = item.select_one('.job_tit a')
-                    # 경력 정보 추출
                     conds = item.select('.job_condition span')
                     exp = conds[1].text.strip() if len(conds) > 1 else "상세 참조"
-                    link = "https://www.saramin.co.kr" + title_tag['href']
-                    jobs.append([co_name, title_tag.text.strip(), exp, link])
+                    jobs.append([co_name, title_tag.text.strip(), exp, "https://www.saramin.co.kr" + title_tag['href']])
             time.sleep(1.5)
         except: continue
     return jobs
 
 def safe_load_df(file_path, default_cols):
-    """컬럼명 깨짐 방지 및 로드 안전장치"""
-    if os.path.exists(file_path):
+    """[KeyError 방지] 파일을 읽고 컬럼명을 강제로 표준화함"""
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
         try:
             df = pd.read_csv(file_path, encoding='utf-8-sig')
+            # 컬럼명 정제 (BOM, 공백 제거)
             df.columns = [c.strip().replace('\ufeff', '') for c in df.columns]
+            # 없는 컬럼 생성
             for col in default_cols:
                 if col not in df.columns: df[col] = ""
+            # 필요한 컬럼만 추출하여 구조 보장
             return df[default_cols]
         except:
             return pd.DataFrame(columns=default_cols)
@@ -135,18 +127,20 @@ def main():
     saramin_targets = ["대영채비", "이브이시스", "플러그링크", "볼트업", "차지비", "에버온"]
     today = datetime.now().strftime('%Y-%m-%d')
     
-    # 데이터 로드
+    # 1. 데이터 로드 및 구조 강제화
     df_master = safe_load_df("job_listings_all.csv", ['company', 'title', 'experience', 'link', 'first_seen'])
     df_ency = safe_load_df("encyclopedia.csv", ['link', 'company', 'title', 'content', 'last_updated'])
     df_comp = safe_load_df("Recruitment_completed.csv", ['company', 'title', 'experience', 'link', 'completed_date'])
 
-    print(f"[{today}] 수집 시작...")
+    print(f"[{today}] 데이터 수집 시작...")
     scraped = get_bep_jobs() + get_saramin_jobs(saramin_targets)
     df_current = pd.DataFrame(scraped, columns=['company', 'title', 'experience', 'link'])
 
-    if df_current.empty: return
+    if df_current.empty:
+        print("수집된 데이터가 없어 종료합니다.")
+        return
 
-    # 1. 신규 공고 및 슬랙
+    # 2. 신규 공고 및 슬랙
     new_entries = df_current[~df_current['link'].isin(df_master['link'])].copy()
     if not new_entries.empty:
         new_entries['first_seen'] = today
@@ -156,7 +150,7 @@ def main():
             requests.post(SLACK_WEBHOOK_URL, json={"text": msg})
         df_master = pd.concat([df_master, new_entries], ignore_index=True)
 
-    # 2. 채용 종료 처리
+    # 3. 채용 종료 처리
     active_cos = df_current['company'].unique()
     is_missing = ~df_master['link'].isin(df_current['link'])
     is_safe = df_master['company'].isin(active_cos)
@@ -166,15 +160,18 @@ def main():
         df_comp = pd.concat([df_comp, closed], ignore_index=True)
         df_master = df_master[~(is_missing & is_safe)]
 
-    # 3. Encyclopedia (상세 내용) 업데이트
-    # 내용이 부실한 것들 재수집 대상으로 포함
-    bad_list = ["채용공고 상세", "본문 내용을 찾을 수 없습니다", "로그인", "링크 참조"]
-    is_bad = df_ency['content'].apply(lambda x: any(k in str(x) for k in bad_list) or len(str(x)) < 150)
+    # 4. Encyclopedia 업데이트 (KeyError 원천 차단 로직)
+    retry_keywords = ["채용공고 상세", "본문 내용을 찾을 수 없습니다", "로그인", "상세 참조"]
+    is_bad = df_ency['content'].apply(lambda x: any(k in str(x) for k in retry_keywords) or len(str(x)) < 150)
     
-    target_links = list(set(df_ency[is_bad]['link'].tolist() + df_current[~df_current['link'].isin(df_ency['link'])]['link'].tolist()))
+    # link 컬럼 존재를 한 번 더 보장한 후 리스트화
+    existing_links = df_ency['link'].tolist() if 'link' in df_ency.columns else []
+    retry_links = df_ency[is_bad]['link'].tolist() if ('link' in df_ency.columns and not df_ency.empty) else []
+    add_links = df_current[~df_current['link'].isin(existing_links)]['link'].tolist()
+    target_links = list(set(retry_links + add_links))
 
     if target_links:
-        print(f"상세 본문/이미지 {len(target_links)}건 작업 중...")
+        print(f"상세 내용/이미지 {len(target_links)}건 수집 중...")
         for link in target_links:
             source = df_current[df_current['link'] == link]
             if source.empty: source = df_master[df_master['link'] == link]
@@ -183,17 +180,17 @@ def main():
             row = source.iloc[0]
             content = fetch_detail_content(link)
             
-            if link in df_ency['link'].values:
+            if link in existing_links:
                 df_ency.loc[df_ency['link'] == link, ['content', 'last_updated']] = [content, today]
             else:
                 new_row = pd.DataFrame([{'link': link, 'company': row['company'], 'title': row['title'], 'content': content, 'last_updated': today}])
                 df_ency = pd.concat([df_ency, new_row], ignore_index=True)
 
-    # 파일 저장
+    # 5. 파일 저장
     df_master.to_csv("job_listings_all.csv", index=False, encoding='utf-8-sig')
     df_comp.to_csv("Recruitment_completed.csv", index=False, encoding='utf-8-sig')
     df_ency.to_csv("encyclopedia.csv", index=False, encoding='utf-8-sig')
-    print("수집 완료.")
+    print("모든 작업 완료.")
 
 if __name__ == "__main__":
     main()
