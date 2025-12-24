@@ -141,15 +141,24 @@ def main():
         df_comp = pd.concat([df_comp, closed_jobs], ignore_index=True).drop_duplicates(subset=['link'])
         df_master = df_master[~is_closed]
 
-    # 4. Encyclopedia 업데이트 (KeyError 방어 로직)
-    # df_ency에 link 컬럼이 확실히 있는지 확인
-    if 'link' in df_ency.columns:
+   # 4. Encyclopedia 업데이트 (KeyError 방어 로직 강화)
+    # df_ency와 df_master에 'link' 컬럼이 실제로 있는지 체크
+    if 'link' in df_ency.columns and 'link' in df_master.columns:
         retry_keywords = ["수집 실패", "로그인", "상세 링크 참조"]
-        is_bad = df_ency['content'].apply(lambda x: any(k in str(x) for k in retry_keywords) or len(str(x)) < 150)
         
-        # 기존 부실 데이터 링크 + 신규 데이터 중 미등록 링크
-        target_links = df_ency[is_bad]['link'].tolist() + df_master[~df_master['link'].isin(df_ency['link'])]['link'].tolist()
-        target_links = list(set(target_links))
+        # content가 NaN일 경우를 대비해 빈 문자열로 처리 후 검사
+        is_bad = df_ency['content'].fillna("").apply(
+            lambda x: any(k in str(x) for k in retry_keywords) or len(str(x)) < 150
+        )
+        
+        # 안전하게 리스트 추출
+        retry_links = df_ency.loc[is_bad, 'link'].tolist()
+        
+        # df_master에서 df_ency에 없는 신규 링크 추출
+        existing_ency_links = df_ency['link'].unique()
+        new_master_links = df_master[~df_master['link'].isin(existing_ency_links)]['link'].tolist()
+        
+        target_links = list(set(retry_links + new_master_links))
 
         if target_links:
             print(f"상세 수집 중... ({len(target_links)}건)")
@@ -158,11 +167,20 @@ def main():
                 if info.empty: continue
                 
                 content = fetch_detail_content(link)
-                if link in df_ency['link'].values:
+                # 기존에 링크가 있으면 업데이트, 없으면 신규 추가
+                if link in existing_ency_links:
                     df_ency.loc[df_ency['link'] == link, ['content', 'last_updated']] = [content, today]
                 else:
-                    new_row = pd.DataFrame([{'link': link, 'company': info.iloc[0]['company'], 'title': info.iloc[0]['title'], 'content': content, 'last_updated': today}])
+                    new_row = pd.DataFrame([{
+                        'link': link, 
+                        'company': info.iloc[0]['company'], 
+                        'title': info.iloc[0]['title'], 
+                        'content': content, 
+                        'last_updated': today
+                    }])
                     df_ency = pd.concat([df_ency, new_row], ignore_index=True)
+    else:
+        print("경고: 데이터프레임에서 'link' 컬럼을 찾을 수 없어 상세 수집을 건너뜁니다.")
 
     # 5. 저장
     df_master.to_csv("job_listings_all.csv", index=False, encoding='utf-8-sig')
