@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 import re
 import os
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
 
 # --- 환경 설정 ---
 SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
@@ -13,7 +13,9 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://bep.co.kr/',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
 }
 
 def safe_load_df(file_path, default_cols):
@@ -29,119 +31,295 @@ def safe_load_df(file_path, default_cols):
             # 없는 컬럼 생성
             for col in default_cols:
                 if col not in df.columns: 
-                    df[col] = "" if col not in ['first_seen', 'completed_date'] else None
+                    df[col] = "" if col not in ['first_seen', 'completed_date', 'last_updated'] else None
             return df[default_cols]
         except Exception as e:
             print(f"로드 실패({file_path}): {e}")
             return pd.DataFrame(columns=default_cols)
     return pd.DataFrame(columns=default_cols)
 
-def fetch_detail_content(url):
-    """상세 본문 추출 (텍스트 우선, 부족하면 이미지)"""
+def is_invalid_content(text):
+    """유효하지 않은 content 판별"""
+    if not text or len(text) < 50:
+        return True
+    
+    invalid_keywords = [
+        "로그인이 필요한",
+        "로그인 유지",
+        "아이디 비밀번호",
+        "회원가입",
+        "본문 바로가기",
+        "검색 폼",
+        "개인정보 보호",
+        "소셜 계정으로",
+        "채용과정에서 수집된"
+    ]
+    
+    # 3개 이상의 키워드가 있으면 로그인 페이지로 판단
+    keyword_count = sum(1 for kw in invalid_keywords if kw in text)
+    if keyword_count >= 3:
+        return True
+    
+    return False
+
+def extract_saramin_detail(url):
+    """사람인 상세 내용 추출 (개선 버전)"""
     try:
+        # rec_idx 추출
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        rec_idx = params.get('rec_idx', [None])[0]
+        
+        if not rec_idx:
+            return "링크 오류"
+        
+        # 직접 상세 페이지로 접근
+        detail_url = f"https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx={rec_idx}"
+        
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        
+        time.sleep(1)
+        res = session.get(detail_url, timeout=15, allow_redirects=True)
+        
+        # 로그인 페이지로 리다이렉트되었는지 확인
+        if 'member/login' in res.url or res.status_code != 200:
+            print(f"    ⚠️  로그인 필요 - 이미지 공고 탐색")
+            # 검색 결과 페이지에서 이미지 추출 시도
+            return extract_image_from_search(url)
+        
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 불필요 요소 제거
+        for tag in soup.select('script, style, nav, footer, header, .btn_area, .login_wrap, #gfm_frame'):
+            tag.decompose()
+        
+        # 1순위: 채용 공고 본문
+        content_selectors = [
+            '.user_content',
+            '.jobcont_wrap',
+            '.jv_cont',
+            '#content',
+            '.recruit_contents'
+        ]
+        
+        for selector in content_selectors:
+            content_area = soup.select_one(selector)
+            if content_area:
+                # 텍스트 추출
+                text = content_area.get_text(separator="\n", strip=True)
+                
+                # 유효성 검사
+                if not is_invalid_content(text) and len(text) > 100:
+                    # 연속 공백 및 줄바꿈 정리
+                    text = re.sub(r'\n{3,}', '\n\n', text)
+                    text = re.sub(r' {2,}', ' ', text)
+                    return text[:15000]
+        
+        # 2순위: 이미지 공고 추출
+        return extract_image_from_search(url)
+        
+    except Exception as e:
+        print(f"    ✗ 추출 실패: {e}")
+        return extract_image_from_search(url)
+
+def extract_image_from_search(url):
+    """검색 결과 페이지에서 이미지 URL 추출"""
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        rec_idx = params.get('rec_idx', [None])[0]
+        searchword = params.get('searchword', [''])[0]
+        
+        if not rec_idx:
+            return "이미지 추출 실패"
+        
+        # 검색 페이지 접근
+        search_url = f"https://www.saramin.co.kr/zf_user/search/recruit?searchword={searchword}"
+        
+        time.sleep(0.5)
+        res = requests.get(search_url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 해당 rec_idx를 가진 항목 찾기
+        for item in soup.select('.item_recruit'):
+            link_tag = item.select_one('.job_tit a')
+            if link_tag and rec_idx in link_tag.get('href', ''):
+                # 이미지 태그 찾기
+                img_tag = item.select_one('.logo img, .thumb img, img')
+                if img_tag:
+                    img_src = img_tag.get('src') or img_tag.get('data-src')
+                    if img_src and 'recruit' in img_src:
+                        return f"[이미지 공고] {img_src}"
+        
+        # 직접 접근 시도
+        detail_url = f"https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx={rec_idx}"
+        res = requests.get(detail_url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        imgs = soup.select('.user_content img, .jobcont_wrap img')
+        recruit_imgs = [img.get('src') or img.get('data-src') for img in imgs 
+                       if img.get('src') and 'recruit' in img.get('src', '')]
+        
+        if recruit_imgs:
+            return "[이미지 공고] " + ", ".join(recruit_imgs[:2])
+        
+        return "상세 링크 참조"
+        
+    except:
+        return "이미지 추출 실패"
+
+def fetch_detail_content(url):
+    """상세 본문 추출 (사이트별 분기)"""
+    try:
+        # 사람인
+        if 'saramin.co.kr' in url:
+            return extract_saramin_detail(url)
+        
+        # BEP 또는 기타
         time.sleep(1)
         res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
+        
         # 불필요 태그 제거
         for tag in soup(["script", "style", "nav", "footer", "header", "button"]): 
             tag.decompose()
 
         # 본문 영역 탐색
-        content_area = soup.select_one('.user_content, .recruit_view_cont, .view_con, .job_detail, body')
+        content_area = soup.select_one('.user_content, .recruit_view_cont, .view_con, .job_detail, .content, body')
         text_content = content_area.get_text(separator="\n", strip=True) if content_area else ""
         
-        # 텍스트가 너무 짧으면 이미지 수집
+        # 유효성 검사
+        if is_invalid_content(text_content):
+            text_content = ""
+        
+        # 텍스트가 부족하면 이미지 수집
         if len(text_content) < 150 and content_area:
             imgs = content_area.find_all('img')
-            img_urls = [urljoin(url, i.get('src') or i.get('data-src')) for i in imgs if i.get('src') or i.get('data-src')]
-            clean_imgs = [i for i in img_urls if not any(x in i.lower() for x in ["icon", "logo", "common"])]
+            img_urls = [urljoin(url, i.get('src') or i.get('data-src')) 
+                       for i in imgs if i.get('src') or i.get('data-src')]
+            clean_imgs = [i for i in img_urls 
+                         if not any(x in i.lower() for x in ["icon", "logo", "common", "header"])]
+            
             if clean_imgs: 
-                return "[이미지 공고] " + ", ".join(clean_imgs[:3])  # 최대 3개만
+                return "[이미지 공고] " + ", ".join(clean_imgs[:3])
 
         return text_content[:15000] if len(text_content) > 50 else "상세 링크 참조"
+        
     except Exception as e:
-        print(f"  [상세수집 실패] {url[:50]}... - {e}")
+        print(f"    [상세수집 실패] {str(e)[:50]}")
         return "수집 실패"
 
 def get_bep_jobs():
-    """BEP(워터) 수집: 개선된 버전"""
+    """BEP(워터) 수집: Selenium 없이 최대한 우회"""
     url = "https://bep.co.kr/Career/recruitment?type=3"
     jobs = []
     
     try:
         print("  [BEP 수집 시작]")
-        res = requests.get(url, headers=HEADERS, timeout=20)
+        
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://bep.co.kr/Career',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        })
+        
+        # 메인 페이지 먼저 방문 (쿠키 획득)
+        session.get('https://bep.co.kr/', timeout=10)
+        time.sleep(1)
+        
+        # 채용 페이지 접근
+        res = session.get(url, timeout=20)
         res.raise_for_status()
+        
         soup = BeautifulSoup(res.text, 'html.parser')
+        print(f"  [응답코드] {res.status_code}")
         
-        # 디버깅: 페이지 구조 확인
-        print(f"  [BEP 응답코드] {res.status_code}")
-        
-        # 전략 1: recruitmentView 링크 찾기
-        links = soup.find_all('a', href=re.compile(r'recruitmentView'))
-        print(f"  [전략1] recruitmentView 링크 {len(links)}개 발견")
-        
-        # 전략 2: 테이블/리스트 구조에서 찾기
-        if not links:
-            # tbody 내 tr 탐색
-            rows = soup.select('tbody tr')
-            print(f"  [전략2] 테이블 행 {len(rows)}개 탐색")
+        # 전략 1: 테이블 구조 탐색
+        table = soup.find('table') or soup.find('tbody')
+        if table:
+            rows = table.find_all('tr')
+            print(f"  [테이블] {len(rows)}개 행 발견")
             
             for row in rows:
                 cells = row.find_all(['td', 'th'])
+                if len(cells) < 2:
+                    continue
+                
+                # 링크 찾기
+                link_tag = row.find('a', href=True)
+                if not link_tag:
+                    continue
+                
+                href = link_tag.get('href', '').strip()
+                if not href or href in ['#', 'javascript:void(0)']:
+                    continue
+                
+                # 텍스트 추출
+                title_text = link_tag.get_text(strip=True)
+                
+                # 상태 확인 (모집중인지)
                 row_text = row.get_text()
+                if "마감" in row_text or "종료" in row_text:
+                    continue
                 
-                # '워터', '전기차', '충전' 키워드가 있는 행만
-                if any(keyword in row_text for keyword in ["워터", "전기차", "충전", "모집중"]):
-                    a_tag = row.find('a', href=True)
-                    if a_tag:
-                        links.append(a_tag)
-        
-        # 전략 3: 전체 a 태그에서 필터링
-        if not links:
-            all_links = soup.find_all('a', href=True)
-            print(f"  [전략3] 전체 링크 {len(all_links)}개 탐색")
-            
-            for a in all_links:
-                href = a.get('href', '')
-                text = a.get_text(strip=True)
+                # 필터링
+                if not title_text or len(title_text) < 3:
+                    continue
+                if title_text in ["목록", "이전", "다음", "HOME"]:
+                    continue
                 
-                # Career 관련 링크이고, 의미있는 텍스트가 있는 경우
-                if 'recruitment' in href.lower() or 'career' in href.lower():
-                    if len(text) > 5 and text not in ["목록", "이전", "다음", "첨부파일"]:
-                        links.append(a)
-        
-        print(f"  [최종] {len(links)}개 링크 처리 시작")
-        
-        # 링크 처리
-        for l in links:
-            href = l.get('href', '').strip()
-            if not href or href in ['#', 'javascript:']:
-                continue
+                full_link = urljoin("https://bep.co.kr", href)
                 
-            full_link = urljoin("https://bep.co.kr", href)
-            title = l.get_text(" ", strip=True)
-            title = re.sub(r'\s+', ' ', title)  # 연속 공백 제거
-            title = title.replace("모집중", "").replace("NEW", "").strip()
-            
-            # 유효성 검사
-            if not title or len(title) < 3:
-                continue
-            if title in ["목록", "이전", "다음", "HOME", "채용공고", "첨부파일"]:
-                continue
-            
-            # 중복 방지
-            if any(j[3] == full_link for j in jobs):
-                continue
-            
-            print(f"    ✓ {title[:30]}")
-            jobs.append(['BEP(워터)', title, "공고 확인", full_link])
+                # 중복 체크
+                if any(j[3] == full_link for j in jobs):
+                    continue
+                
+                print(f"    ✓ {title_text}")
+                jobs.append(['BEP(워터)', title_text, "공고 확인", full_link])
         
-        print(f"  [BEP 수집 완료] {len(jobs)}건")
+        # 전략 2: 리스트 구조
+        if not jobs:
+            items = soup.select('.recruit_list li, .list_item, .recruitment_item')
+            print(f"  [리스트] {len(items)}개 항목 탐색")
+            
+            for item in items:
+                link_tag = item.find('a', href=True)
+                if not link_tag:
+                    continue
+                
+                href = link_tag.get('href', '').strip()
+                title = link_tag.get_text(strip=True)
+                
+                if href and title and len(title) > 3:
+                    full_link = urljoin("https://bep.co.kr", href)
+                    if not any(j[3] == full_link for j in jobs):
+                        jobs.append(['BEP(워터)', title, "공고 확인", full_link])
+        
+        # 전략 3: recruitmentView 직접 검색
+        if not jobs:
+            all_links = soup.find_all('a', href=re.compile(r'recruitment'))
+            print(f"  [전체링크] {len(all_links)}개 필터링")
+            
+            for link in all_links:
+                href = link.get('href', '')
+                text = link.get_text(strip=True)
+                
+                if 'view' in href.lower() and len(text) > 3:
+                    if text not in ["목록", "이전", "다음"]:
+                        full_link = urljoin("https://bep.co.kr", href)
+                        if not any(j[3] == full_link for j in jobs):
+                            jobs.append(['BEP(워터)', text, "공고 확인", full_link])
+        
+        print(f"  [BEP 완료] {len(jobs)}건 수집")
+        
+        # 수집 실패 시 직접 링크 추가 (알려진 공고가 있다면)
+        if not jobs:
+            print("  ⚠️  자동 수집 실패 - 수동 확인 필요")
         
     except Exception as e:
-        print(f"  [BEP 수집 오류] {e}")
-        # 실패 시에도 빈 리스트 반환 (프로그램 중단 방지)
+        print(f"  [BEP 오류] {e}")
     
     return jobs
 
@@ -165,7 +343,7 @@ def get_saramin_jobs(companies):
                     conds = item.select('.job_condition span')
                     exp = conds[1].text.strip() if len(conds) > 1 else "경력무관"
                     
-                    link = ("https://www.saramin.co.kr" + title_tag['href']).strip()
+                    link = "https://www.saramin.co.kr" + title_tag['href']
                     jobs.append([co_tag.text.strip(), title_tag.text.strip(), exp, link])
                     count += 1
             
@@ -181,7 +359,7 @@ def get_saramin_jobs(companies):
 def main():
     today = datetime.now().strftime('%Y-%m-%d')
     
-    # 1. 기존 데이터 로드 (수정된 컬럼 구조)
+    # 1. 기존 데이터 로드
     df_master = safe_load_df("job_listings_all.csv", ['company', 'title', 'experience', 'link', 'first_seen'])
     df_ency = safe_load_df("encyclopedia.csv", ['link', 'company', 'title', 'content', 'first_seen', 'completed_date', 'last_updated'])
     df_comp = safe_load_df("Recruitment_completed.csv", ['company', 'title', 'experience', 'link', 'completed_date', 'first_seen'])
@@ -208,7 +386,7 @@ def main():
     
     print(f"\n📊 수집 결과: 총 {len(df_current)}건")
 
-    # 3. 신규 공고 알림 및 master 업데이트
+    # 3. 신규 공고 처리
     new_entries = df_current[~df_current['link'].isin(df_master['link'])].copy()
     
     if not new_entries.empty:
@@ -225,7 +403,7 @@ def main():
     else:
         print("\n✅ 신규 공고 없음")
 
-    # 4. 채용 종료 처리
+    # 4. 종료 공고 처리
     active_links = df_current['link'].tolist()
     successfully_scraped_companies = df_current['company'].unique()
     
@@ -240,10 +418,10 @@ def main():
         df_comp = pd.concat([df_comp, closed_jobs], ignore_index=True)
         df_master = df_master[~(is_missing & is_target_company)]
 
-    # 5. Encyclopedia 업데이트 (수정된 로직)
+    # 5. Encyclopedia 업데이트
     print(f"\n📚 백과사전 업데이트 중...")
     
-    # 5-1. 신규 링크 추가 (content는 아직 없음)
+    # 5-1. 신규 링크 추가
     new_for_ency = df_master[~df_master['link'].isin(df_ency['link'])].copy()
     
     if not new_for_ency.empty:
@@ -253,43 +431,48 @@ def main():
                 'link': row['link'],
                 'company': row['company'],
                 'title': row['title'],
-                'content': '',  # 일단 빈 값
+                'content': '',
                 'first_seen': row['first_seen'],
                 'completed_date': None,
                 'last_updated': None
             }])
             df_ency = pd.concat([df_ency, new_row], ignore_index=True)
     
-    # 5-2. 종료된 공고의 completed_date 업데이트
+    # 5-2. 종료 공고 날짜 기록
     closed_links = closed_jobs['link'].tolist() if not closed_jobs.empty else []
     if closed_links:
         print(f"  • 종료 공고 {len(closed_links)}건 날짜 기록")
         df_ency.loc[df_ency['link'].isin(closed_links), 'completed_date'] = today
     
-    # 5-3. content 수집 대상 선정 (중복 수집 방지)
-    retry_keywords = ["수집 실패", "로그인", "상세 링크 참조"]
-    needs_content = (
+    # 5-3. Content 수집 (무효한 content 재수집)
+    needs_update = (
         (df_ency['content'].isna()) | 
-        (df_ency['content'] == '') | 
-        (df_ency['content'].str.len() < 150) |
-        (df_ency['content'].apply(lambda x: any(k in str(x) for k in retry_keywords)))
+        (df_ency['content'] == '') |
+        (df_ency['content'].str.len() < 100) |
+        (df_ency['content'].str.contains('로그인이 필요한|수집 실패|이미지 추출 실패', na=False)) |
+        (df_ency['content'].apply(lambda x: is_invalid_content(str(x))))
     )
     
-    # 현재 활성 공고 중에서만 수집 (종료된 공고는 제외)
-    active_and_needs = df_ency[needs_content & df_ency['link'].isin(active_links)]
+    # 활성 공고만 수집
+    active_and_needs = df_ency[needs_update & df_ency['link'].isin(active_links)]
     
     if not active_and_needs.empty:
         print(f"  • 상세 내용 수집 대상: {len(active_and_needs)}건")
         
         for idx, row in active_and_needs.iterrows():
             link = row['link']
-            print(f"    [{idx+1}/{len(active_and_needs)}] {row['company']} - {row['title'][:30]}")
+            print(f"    [{list(active_and_needs.index).index(idx)+1}/{len(active_and_needs)}] {row['company']} - {row['title'][:30]}")
             
             content = fetch_detail_content(link)
+            
+            # 재검증
+            if is_invalid_content(content):
+                content = "상세 링크 참조"
+            
             df_ency.loc[df_ency['link'] == link, ['content', 'last_updated']] = [content, today]
-            time.sleep(0.5)  # 서버 부하 방지
+            time.sleep(1)  # 서버 부하 방지
 
-    # 6. 최종 중복 제거 및 정렬
+    # 6. 최종 저장
     print(f"\n💾 파일 저장 중...")
     
     for df in [df_master, df_comp, df_ency]:
@@ -297,11 +480,10 @@ def main():
             df['link'] = df['link'].astype(str).str.strip()
             df.drop_duplicates(subset=['link'], keep='first', inplace=True)
 
-    # Encyclopedia 정렬: 회사명 내림차순, first_seen 내림차순
+    # 정렬
     if 'company' in df_ency.columns and 'first_seen' in df_ency.columns:
         df_ency = df_ency.sort_values(by=['company', 'first_seen'], ascending=[False, False])
 
-    # 저장
     df_master.to_csv("job_listings_all.csv", index=False, encoding='utf-8-sig')
     df_comp.to_csv("Recruitment_completed.csv", index=False, encoding='utf-8-sig')
     df_ency.to_csv("encyclopedia.csv", index=False, encoding='utf-8-sig')
